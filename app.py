@@ -1,8 +1,9 @@
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify, send_file
 import subprocess
 import json
+import tempfile
+import os
 from flask_cors import CORS
-import requests
 
 app = Flask(__name__)
 CORS(app)
@@ -35,24 +36,43 @@ def get_video_info():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 @app.route("/api/download", methods=["POST"])
-def download_proxy():
+def download_video():
     data = request.get_json()
     url = data.get("url")
+    format_id = data.get("format_id")
 
-    if not url:
-        return jsonify({"error": "No download URL provided"}), 400
+    if not url or not format_id:
+        return jsonify({"error": "Missing URL or format_id"}), 400
 
     try:
-        # Stream content from the source URL
-        with requests.get(url, stream=True) as r:
-            headers = {
-                'Content-Disposition': 'attachment; filename="download"',
-                'Content-Type': r.headers.get('Content-Type', 'application/octet-stream')
-            }
-            return Response(r.iter_content(chunk_size=8192), headers=headers)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = os.path.join(temp_dir, "%(title)s.%(ext)s")
+
+            result = subprocess.run(
+                ["yt-dlp", "-f", format_id, "-o", output_path, url],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=60
+            )
+
+            if result.returncode != 0:
+                return jsonify({"error": result.stderr.decode()}), 400
+
+            # Find downloaded file
+            for file_name in os.listdir(temp_dir):
+                file_path = os.path.join(temp_dir, file_name)
+                return send_file(file_path, as_attachment=True)
+
+            return jsonify({"error": "Download failed"}), 500
+
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "Download timed out"}), 408
+
     except Exception as e:
-        return jsonify({"error": f"Download failed: {str(e)}"}), 500
+        return jsonify({"error": str(e)}), 500
+
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
