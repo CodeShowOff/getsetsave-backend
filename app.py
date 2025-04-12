@@ -1,14 +1,11 @@
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, Response
+import subprocess
+import json
 from flask_cors import CORS
-from yt_dlp import YoutubeDL
-import os
-import uuid
+import requests
 
 app = Flask(__name__)
 CORS(app)
-
-DOWNLOAD_DIR = "downloads"
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 @app.route("/api/info", methods=["POST"])
 def get_video_info():
@@ -19,60 +16,43 @@ def get_video_info():
         return jsonify({"error": "No URL provided"}), 400
 
     try:
-        ydl_opts = {
-            'quiet': True,
-            'skip_download': True,
-            'noplaylist': True,
-            'extract_flat': False,
-            'nocheckcertificate': True,
-            'user_agent': 'Mozilla/5.0'
-        }
+        result = subprocess.run(
+            ["yt-dlp", "-J", "--no-playlist", url],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=20
+        )
 
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            return jsonify(info)
+        if result.returncode != 0:
+            return jsonify({"error": result.stderr.decode()}), 400
+
+        info = json.loads(result.stdout)
+        return jsonify(info)
+
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "Timeout while fetching video info"}), 408
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/download", methods=["POST"])
-def download_video():
+def download_proxy():
     data = request.get_json()
     url = data.get("url")
-    format_id = data.get("format_id")
-    kind = data.get("kind")  # "audio" or "video"
 
-    if not url or not format_id or not kind:
-        return jsonify({"error": "Missing URL, kind, or format ID"}), 400
-
-    ext = "mp3" if kind == "audio" else "mp4"
-    filename = f"{uuid.uuid4()}.{ext}"
-    filepath = os.path.join(DOWNLOAD_DIR, filename)
-
-    ydl_opts = {
-        'format': format_id,
-        'outtmpl': filepath,
-        'quiet': True
-    }
-
-    # Convert to MP3 if audio-only
-    if kind == "audio":
-        ydl_opts.update({
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }]
-        })
-    else:
-        ydl_opts['merge_output_format'] = 'mp4'
+    if not url:
+        return jsonify({"error": "No download URL provided"}), 400
 
     try:
-        with YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-        return send_file(filepath, as_attachment=True)
+        # Stream content from the source URL
+        with requests.get(url, stream=True) as r:
+            headers = {
+                'Content-Disposition': 'attachment; filename="download"',
+                'Content-Type': r.headers.get('Content-Type', 'application/octet-stream')
+            }
+            return Response(r.iter_content(chunk_size=8192), headers=headers)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": f"Download failed: {str(e)}"}), 500
 
 if __name__ == "__main__":
-    app.run(debug=False, host="0.0.0.0", port=5000)
+    app.run(debug=True, port=5000)
